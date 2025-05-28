@@ -3,6 +3,10 @@ import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
 import org.apache.pdfbox.pdmodel.interactive.form.PDField;
 import org.apache.pdfbox.pdmodel.interactive.form.PDNonTerminalField;
+import org.apache.pdfbox.cos.COSBase;
+import org.apache.pdfbox.cos.COSDictionary;
+import org.apache.pdfbox.cos.COSStream;
+import org.apache.pdfbox.cos.COSName;
 import javax.xml.parsers.DocumentBuilderFactory;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
@@ -40,35 +44,13 @@ public class ExtractPDFContent {
         PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm();
         if (acroForm != null) {
             System.out.println("Form Type: AcroForm");
-            // Check for XFA form
+            // Check for XFA data in AcroForm
             if (acroForm.getXFA() != null) {
-                System.out.println("XFA Form Detected.");
-                // Extract XFA XML data
+                System.out.println("XFA Form Detected in AcroForm.");
                 byte[] xfaData = acroForm.getXFA().getBytes();
-                // Parse XFA XML inline
-                try {
-                    DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-                    Document doc = factory.newDocumentBuilder().parse(new ByteArrayInputStream(xfaData));
-                    doc.getDocumentElement().normalize();
-                    // Look for <field> elements (common in XFA forms)
-                    NodeList fields = doc.getElementsByTagName("field");
-                    System.out.println("=== XFA Form Fields ===");
-                    if (fields.getLength() == 0) {
-                        System.out.println("No XFA fields found in XML dataset.");
-                    }
-                    for (int i = 0; i < fields.getLength(); i++) {
-                        Element field = (Element) fields.item(i);
-                        String name = field.getAttribute("name");
-                        String value = field.getTextContent();
-                        if (name != null && !name.isEmpty()) {
-                            System.out.printf("XFA Field Name: %s, Value: %s%n", name, value);
-                        }
-                    }
-                } catch (Exception e) {
-                    System.err.println("Error parsing XFA XML: " + e.getMessage());
-                }
+                parseXfaData(xfaData);
             }
-            // Also check AcroForm fields
+            // Extract any AcroForm fields
             for (PDField field : acroForm.getFields()) {
                 System.out.printf("AcroForm Field Name: %s, Type: %s, Value: %s%n",
                     field.getFullyQualifiedName(), field.getFieldType(), field.getValueAsString());
@@ -82,32 +64,57 @@ public class ExtractPDFContent {
             }
         } else {
             System.out.println("No AcroForm found in the PDF.");
-            if (document.getDocumentCatalog().getXFA() != null) {
-                System.out.println("XFA Form Detected (No AcroForm).");
-                byte[] xfaData = document.getDocumentCatalog().getXFA().getBytes();
-                try {
-                    DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-                    Document doc = factory.newDocumentBuilder().parse(new ByteArrayInputStream(xfaData));
-                    doc.getDocumentElement().normalize();
-                    NodeList fields = doc.getElementsByTagName("field");
-                    System.out.println("=== XFA Form Fields ===");
-                    if (fields.getLength() == 0) {
-                        System.out.println("No XFA fields found in XML dataset.");
-                    }
-                    for (int i = 0; i < fields.getLength(); i++) {
-                        Element field = (Element) fields.item(i);
-                        String name = field.getAttribute("name");
-                        String value = field.getTextContent();
-                        if (name != null && !name.isEmpty()) {
-                            System.out.printf("XFA Field Name: %s, Value: %s%n", name, value);
-                        }
-                    }
-                } catch (Exception e) {
-                    System.err.println("Error parsing XFA XML: " + e.getMessage());
-                }
+            // Try to extract XFA data directly from the document catalog
+            COSDictionary catalog = document.getDocumentCatalog().getCOSObject();
+            COSBase xfaBase = catalog.getDictionaryObject(COSName.getPDFName("XFA"));
+            if (xfaBase instanceof COSStream) {
+                System.out.println("XFA Stream Detected in Document Catalog.");
+                COSStream xfaStream = (COSStream) xfaBase;
+                byte[] xfaData = xfaStream.toByteArray();
+                parseXfaData(xfaData);
             } else {
-                System.out.println("No form fields (AcroForm or XFA) found in the PDF.");
+                System.out.println("No XFA data found in the PDF.");
             }
+        }
+    }
+
+    private static void parseXfaData(byte[] xfaData) {
+        if (xfaData == null || xfaData.length == 0) {
+            System.out.println("XFA data is empty or not available.");
+            return;
+        }
+        System.out.println("=== XFA Form Fields ===");
+        try {
+            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+            Document doc = factory.newDocumentBuilder().parse(new ByteArrayInputStream(xfaData));
+            doc.getDocumentElement().normalize();
+            // Search for <field> elements
+            NodeList fields = doc.getElementsByTagName("field");
+            if (fields.getLength() == 0) {
+                System.out.println("No XFA fields found in XML dataset.");
+                // Debug: Print raw XML to inspect structure
+                System.out.println("Raw XFA XML: " + new String(xfaData));
+            }
+            for (int i = 0; i < fields.getLength(); i++) {
+                Element field = (Element) fields.item(i);
+                String name = field.getAttribute("name");
+                String value = field.getTextContent();
+                if (name != null && !name.isEmpty()) {
+                    System.out.printf("XFA Field Name: %s, Value: %s%n", name, value);
+                }
+            }
+            // Optional: Search all elements with a name attribute
+            NodeList allNodes = doc.getElementsByTagName("*");
+            for (int i = 0; i < allNodes.getLength(); i++) {
+                Element elem = (Element) allNodes.item(i);
+                String name = elem.getAttribute("name");
+                String value = elem.getTextContent();
+                if (name != null && !name.isEmpty() && !name.equals("topmostSubform")) {
+                    System.out.printf("XFA Element Name: %s, Value: %s%n", name, value);
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error parsing XFA XML: " + e.getMessage());
         }
     }
 }
