@@ -2,33 +2,32 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
 import org.apache.pdfbox.pdmodel.interactive.form.PDField;
+import org.apache.pdfbox.pdmodel.interactive.form.PDNonTerminalField;
+import javax.xml.parsers.DocumentBuilderFactory;
+import org.w3c.dom.Document;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 import java.io.File;
 import java.io.IOException;
+import java.io.ByteArrayInputStream;
 
 public class ExtractPDFContent {
     public static void main(String[] args) {
-        // Specify the path to your PDF file
-        String pdfFilePath = "path/to/your/form.pdf"; // Replace with your PDF file path
-
+        // Replace with your PDF file path
+        String pdfFilePath = "path/to/your/form.pdf";
         try {
-            // Load the PDF document
             File file = new File(pdfFilePath);
             PDDocument document = PDDocument.load(file);
-
-            // Extract text content from the PDF
             extractTextContent(document);
-
-            // Extract form field data
             extractFormFields(document);
-
-            // Close the document
             document.close();
         } catch (IOException e) {
             System.err.println("Error processing PDF: " + e.getMessage());
+        } catch (Exception e) {
+            System.err.println("Error parsing XFA data: " + e.getMessage());
         }
     }
 
-    // Method to extract text content from the PDF
     private static void extractTextContent(PDDocument document) throws IOException {
         System.out.println("=== Extracted Text Content ===");
         PDFTextStripper textStripper = new PDFTextStripper();
@@ -36,22 +35,79 @@ public class ExtractPDFContent {
         System.out.println(text);
     }
 
-    // Method to extract form field data
     private static void extractFormFields(PDDocument document) throws IOException {
         System.out.println("=== Extracted Form Field Data ===");
         PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm();
-        
         if (acroForm != null) {
+            System.out.println("Form Type: AcroForm");
+            // Check for XFA form
+            if (acroForm.getXFA() != null) {
+                System.out.println("XFA Form Detected.");
+                // Extract XFA XML data
+                byte[] xfaData = acroForm.getXFA().getBytes();
+                // Parse XFA XML inline
+                try {
+                    DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+                    Document doc = factory.newDocumentBuilder().parse(new ByteArrayInputStream(xfaData));
+                    doc.getDocumentElement().normalize();
+                    // Look for <field> elements (common in XFA forms)
+                    NodeList fields = doc.getElementsByTagName("field");
+                    System.out.println("=== XFA Form Fields ===");
+                    if (fields.getLength() == 0) {
+                        System.out.println("No XFA fields found in XML dataset.");
+                    }
+                    for (int i = 0; i < fields.getLength(); i++) {
+                        Element field = (Element) fields.item(i);
+                        String name = field.getAttribute("name");
+                        String value = field.getTextContent();
+                        if (name != null && !name.isEmpty()) {
+                            System.out.printf("XFA Field Name: %s, Value: %s%n", name, value);
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println("Error parsing XFA XML: " + e.getMessage());
+                }
+            }
+            // Also check AcroForm fields
             for (PDField field : acroForm.getFields()) {
-                String fieldName = field.getFullyQualifiedName();
-                String fieldValue = field.getValueAsString();
-                String fieldType = field.getFieldType();
-                
-                System.out.printf("Field Name: %s, Type: %s, Value: %s%n", 
-                    fieldName, fieldType, fieldValue);
+                System.out.printf("AcroForm Field Name: %s, Type: %s, Value: %s%n",
+                    field.getFullyQualifiedName(), field.getFieldType(), field.getValueAsString());
+                if (field instanceof PDNonTerminalField) {
+                    System.out.println("  Subfields: ");
+                    for (PDField subField : ((PDNonTerminalField) field).getChildren()) {
+                        System.out.printf("    Subfield Name: %s, Type: %s, Value: %s%n",
+                            subField.getFullyQualifiedName(), subField.getFieldType(), subField.getValueAsString());
+                    }
+                }
             }
         } else {
-            System.out.println("No form fields found in the PDF.");
+            System.out.println("No AcroForm found in the PDF.");
+            if (document.getDocumentCatalog().getXFA() != null) {
+                System.out.println("XFA Form Detected (No AcroForm).");
+                byte[] xfaData = document.getDocumentCatalog().getXFA().getBytes();
+                try {
+                    DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+                    Document doc = factory.newDocumentBuilder().parse(new ByteArrayInputStream(xfaData));
+                    doc.getDocumentElement().normalize();
+                    NodeList fields = doc.getElementsByTagName("field");
+                    System.out.println("=== XFA Form Fields ===");
+                    if (fields.getLength() == 0) {
+                        System.out.println("No XFA fields found in XML dataset.");
+                    }
+                    for (int i = 0; i < fields.getLength(); i++) {
+                        Element field = (Element) fields.item(i);
+                        String name = field.getAttribute("name");
+                        String value = field.getTextContent();
+                        if (name != null && !name.isEmpty()) {
+                            System.out.printf("XFA Field Name: %s, Value: %s%n", name, value);
+                        }
+                    }
+                } catch (Exception e) {
+                    System.err.println("Error parsing XFA XML: " + e.getMessage());
+                }
+            } else {
+                System.out.println("No form fields (AcroForm or XFA) found in the PDF.");
+            }
         }
     }
 }
