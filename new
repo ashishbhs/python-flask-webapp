@@ -54,13 +54,19 @@ public class ExtractPDFContent {
             }
             // Extract any AcroForm fields
             for (PDField field : acroForm.getFields()) {
-                System.out.printf("AcroForm Field Name: %s, Type: %s, Value: %s%n",
-                    field.getFullyQualifiedName(), field.getFieldType(), field.getValueAsString());
+                String name = field.getFullyQualifiedName();
+                String value = field.getValueAsString();
+                if (name != null && !name.isEmpty()) {
+                    System.out.println(name + " " + value);
+                }
                 if (field instanceof PDNonTerminalField) {
                     System.out.println("  Subfields: ");
                     for (PDField subField : ((PDNonTerminalField) field).getChildren()) {
-                        System.out.printf("    Subfield Name: %s, Type: %s, Value: %s%n",
-                            subField.getFullyQualifiedName(), subField.getFieldType(), subField.getValueAsString());
+                        String subName = subField.getFullyQualifiedName();
+                        String subValue = subField.getValueAsString();
+                        if (subName != null && !subName.isEmpty()) {
+                            System.out.println("    " + subName + " " + subValue);
+                        }
                     }
                 }
             }
@@ -114,7 +120,7 @@ public class ExtractPDFContent {
                 String name = field.getAttribute("name");
                 String value = field.getTextContent();
                 if (name != null && !name.isEmpty()) {
-                    System.out.printf("XFA Field Name: %s, Value: %s%n", name, value);
+                    System.out.println(name + " " + value);
                 }
             }
             // Search all elements with a name attribute
@@ -124,7 +130,7 @@ public class ExtractPDFContent {
                 String name = elem.getAttribute("name");
                 String value = elem.getTextContent();
                 if (name != null && !name.isEmpty() && !name.equals("topmostSubform")) {
-                    System.out.printf("XFA Element Name: %s, Value: %s%n", name, value);
+                    System.out.println(name + " " + value);
                 }
             }
         } catch (Exception e) {
