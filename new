@@ -1,140 +1,36 @@
+import net.sourceforge.tess4j.ITesseract;
+import net.sourceforge.tess4j.Tesseract;
+import net.sourceforge.tess4j.TesseractException;
 import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.text.PDFTextStripper;
-import org.apache.pdfbox.pdmodel.interactive.form.PDAcroForm;
-import org.apache.pdfbox.pdmodel.interactive.form.PDField;
-import org.apache.pdfbox.pdmodel.interactive.form.PDNonTerminalField;
-import org.apache.pdfbox.cos.COSBase;
-import org.apache.pdfbox.cos.COSDictionary;
-import org.apache.pdfbox.cos.COSStream;
-import org.apache.pdfbox.cos.COSName;
-import javax.xml.parsers.DocumentBuilderFactory;
-import org.w3c.dom.Document;
-import org.w3c.dom.Element;
-import org.w3c.dom.NodeList;
+import org.apache.pdfbox.rendering.PDFRenderer;
+
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
 import java.io.File;
-import java.io.IOException;
-import java.io.ByteArrayOutputStream;
-import java.io.InputStream;
-import java.io.ByteArrayInputStream;
 
-public class ExtractPDFContent {
+public class PDFOCRExtractor {
     public static void main(String[] args) {
-        // Replace with your PDF file path
-        String pdfFilePath = "path/to/your/form.pdf";
-        try {
-            File file = new File(pdfFilePath);
-            PDDocument document = PDDocument.load(file);
-            extractTextContent(document);
-            extractFormFields(document);
-            document.close();
-        } catch (IOException e) {
-            System.err.println("Error processing PDF: " + e.getMessage());
+        String pdfPath = "filled_form.pdf"; // your PDF file
+        String tessDataPath = "tessdata";   // path to tessdata folder
+
+        try (PDDocument document = PDDocument.load(new File(pdfPath))) {
+            PDFRenderer renderer = new PDFRenderer(document);
+            ITesseract tesseract = new Tesseract();
+            tesseract.setDatapath(tessDataPath); // path to traineddata files
+            tesseract.setLanguage("eng");
+
+            for (int page = 0; page < document.getNumberOfPages(); page++) {
+                BufferedImage image = renderer.renderImageWithDPI(page, 300); // high-res for better OCR
+                // Optional: Save image for inspection
+                // ImageIO.write(image, "png", new File("page_" + page + ".png"));
+
+                System.out.println("----- Page " + (page + 1) + " -----");
+                String result = tesseract.doOCR(image);
+                System.out.println(result);
+            }
+
         } catch (Exception e) {
-            System.err.println("Error parsing XFA data: " + e.getMessage());
-        }
-    }
-
-    private static void extractTextContent(PDDocument document) throws IOException {
-        System.out.println("=== Extracted Text Content ===");
-        PDFTextStripper textStripper = new PDFTextStripper();
-        String text = textStripper.getText(document);
-        System.out.println(text);
-    }
-
-    private static void extractFormFields(PDDocument document) throws IOException {
-        System.out.println("=== Extracted Form Field Data ===");
-        PDAcroForm acroForm = document.getDocumentCatalog().getAcroForm();
-        if (acroForm != null) {
-            System.out.println("Form Type: AcroForm");
-            // Check for XFA data in AcroForm
-            if (acroForm.getXFA() != null) {
-                System.out.println("XFA Form Detected in AcroForm.");
-                byte[] xfaData = acroForm.getXFA().getBytes();
-                parseXfaData(xfaData);
-            }
-            // Extract any AcroForm fields
-            for (PDField field : acroForm.getFields()) {
-                String name = field.getFullyQualifiedName();
-                String value = field.getValueAsString();
-                if (name != null && !name.isEmpty()) {
-                    System.out.println(name + " " + value);
-                }
-                if (field instanceof PDNonTerminalField) {
-                    System.out.println("  Subfields: ");
-                    for (PDField subField : ((PDNonTerminalField) field).getChildren()) {
-                        String subName = subField.getFullyQualifiedName();
-                        String subValue = subField.getValueAsString();
-                        if (subName != null && !subName.isEmpty()) {
-                            System.out.println("    " + subName + " " + subValue);
-                        }
-                    }
-                }
-            }
-        } else {
-            System.out.println("No AcroForm found in the PDF.");
-            // Try to extract XFA data from the document catalog
-            COSDictionary catalog = document.getDocumentCatalog().getCOSObject();
-            COSBase xfaBase = catalog.getDictionaryObject(COSName.getPDFName("XFA"));
-            if (xfaBase instanceof COSStream) {
-                System.out.println("XFA Stream Detected in Document Catalog.");
-                COSStream xfaStream = (COSStream) xfaBase;
-                byte[] xfaData = readStreamToByteArray(xfaStream);
-                parseXfaData(xfaData);
-            } else {
-                System.out.println("No XFA data found in the PDF.");
-            }
-        }
-    }
-
-    private static byte[] readStreamToByteArray(COSStream stream) throws IOException {
-        try (InputStream inputStream = stream.createInputStream();
-             ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[1024];
-            int bytesRead;
-            while ((bytesRead = inputStream.read(buffer)) != -1) {
-                outputStream.write(buffer, 0, bytesRead);
-            }
-            return outputStream.toByteArray();
-        }
-    }
-
-    private static void parseXfaData(byte[] xfaData) {
-        if (xfaData == null || xfaData.length == 0) {
-            System.out.println("XFA data is empty or not available.");
-            return;
-        }
-        System.out.println("=== XFA Form Fields ===");
-        try {
-            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-            Document doc = factory.newDocumentBuilder().parse(new ByteArrayInputStream(xfaData));
-            doc.getDocumentElement().normalize();
-            // Search for <field> elements
-            NodeList fields = doc.getElementsByTagName("field");
-            if (fields.getLength() == 0) {
-                System.out.println("No XFA fields found in XML dataset.");
-                // Debug: Print raw XML to inspect structure
-                System.out.println("Raw XFA XML: " + new String(xfaData));
-            }
-            for (int i = 0; i < fields.getLength(); i++) {
-                Element field = (Element) fields.item(i);
-                String name = field.getAttribute("name");
-                String value = field.getTextContent();
-                if (name != null && !name.isEmpty()) {
-                    System.out.println(name + " " + value);
-                }
-            }
-            // Search all elements with a name attribute
-            NodeList allNodes = doc.getElementsByTagName("*");
-            for (int i = 0; i < allNodes.getLength(); i++) {
-                Element elem = (Element) allNodes.item(i);
-                String name = elem.getAttribute("name");
-                String value = elem.getTextContent();
-                if (name != null && !name.isEmpty() && !name.equals("topmostSubform")) {
-                    System.out.println(name + " " + value);
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("Error parsing XFA XML: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 }
