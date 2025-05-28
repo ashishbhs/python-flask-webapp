@@ -13,6 +13,8 @@ import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 import java.io.File;
 import java.io.IOException;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.ByteArrayInputStream;
 
 public class ExtractPDFContent {
@@ -64,17 +66,29 @@ public class ExtractPDFContent {
             }
         } else {
             System.out.println("No AcroForm found in the PDF.");
-            // Try to extract XFA data directly from the document catalog
+            // Try to extract XFA data from the document catalog
             COSDictionary catalog = document.getDocumentCatalog().getCOSObject();
             COSBase xfaBase = catalog.getDictionaryObject(COSName.getPDFName("XFA"));
             if (xfaBase instanceof COSStream) {
                 System.out.println("XFA Stream Detected in Document Catalog.");
                 COSStream xfaStream = (COSStream) xfaBase;
-                byte[] xfaData = xfaStream.toByteArray();
+                byte[] xfaData = readStreamToByteArray(xfaStream);
                 parseXfaData(xfaData);
             } else {
                 System.out.println("No XFA data found in the PDF.");
             }
+        }
+    }
+
+    private static byte[] readStreamToByteArray(COSStream stream) throws IOException {
+        try (InputStream inputStream = stream.createInputStream();
+             ByteArrayOutputStream outputStream = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[1024];
+            int bytesRead;
+            while ((bytesRead = inputStream.read(buffer)) != -1) {
+                outputStream.write(buffer, 0, bytesRead);
+            }
+            return outputStream.toByteArray();
         }
     }
 
@@ -103,7 +117,7 @@ public class ExtractPDFContent {
                     System.out.printf("XFA Field Name: %s, Value: %s%n", name, value);
                 }
             }
-            // Optional: Search all elements with a name attribute
+            // Search all elements with a name attribute
             NodeList allNodes = doc.getElementsByTagName("*");
             for (int i = 0; i < allNodes.getLength(); i++) {
                 Element elem = (Element) allNodes.item(i);
