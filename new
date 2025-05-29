@@ -1,36 +1,65 @@
-import net.sourceforge.tess4j.ITesseract;
-import net.sourceforge.tess4j.Tesseract;
-import net.sourceforge.tess4j.TesseractException;
-import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.rendering.PDFRenderer;
+import fitz  # PyMuPDF
+import pdfplumber
+from pdf2image import convert_from_path
+import pytesseract
+import re
+import os
 
-import javax.imageio.ImageIO;
-import java.awt.image.BufferedImage;
-import java.io.File;
+def extract_text_kv(pdf_path):
+    doc = fitz.open(pdf_path)
+    kv_pairs = []
+    for page in doc:
+        text = page.get_text()
+        # Matches: Key : Value (with optional whitespace)
+        pairs = re.findall(r'([\w\s]+?)\s*:\s*([\w\s]+)', text)
+        kv_pairs.extend([(k.strip(), v.strip()) for k, v in pairs])
+    return kv_pairs
 
-public class PDFOCRExtractor {
-    public static void main(String[] args) {
-        String pdfPath = "filled_form.pdf"; // your PDF file
-        String tessDataPath = "tessdata";   // path to tessdata folder
+def extract_table_kv(pdf_path):
+    kv_pairs = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                for row in table:
+                    if len(row) == 2 and row[0] and row[1]:
+                        kv_pairs.append((row[0].strip(), row[1].strip()))
+    return kv_pairs
 
-        try (PDDocument document = PDDocument.load(new File(pdfPath))) {
-            PDFRenderer renderer = new PDFRenderer(document);
-            ITesseract tesseract = new Tesseract();
-            tesseract.setDatapath(tessDataPath); // path to traineddata files
-            tesseract.setLanguage("eng");
+def extract_ocr_kv(pdf_path):
+    images = convert_from_path(pdf_path)
+    kv_pairs = []
+    for image in images:
+        text = pytesseract.image_to_string(image)
+        pairs = re.findall(r'([\w\s]+?)\s*:\s*([\w\s]+)', text)
+        kv_pairs.extend([(k.strip(), v.strip()) for k, v in pairs])
+    return kv_pairs
 
-            for (int page = 0; page < document.getNumberOfPages(); page++) {
-                BufferedImage image = renderer.renderImageWithDPI(page, 300); // high-res for better OCR
-                // Optional: Save image for inspection
-                // ImageIO.write(image, "png", new File("page_" + page + ".png"));
+def extract_all(pdf_path):
+    print(f"📄 Processing PDF: {pdf_path}")
 
-                System.out.println("----- Page " + (page + 1) + " -----");
-                String result = tesseract.doOCR(image);
-                System.out.println(result);
-            }
+    text_kv = extract_text_kv(pdf_path)
+    print(f"✅ Text-based key-value pairs: {len(text_kv)}")
 
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
-    }
-}
+    table_kv = extract_table_kv(pdf_path)
+    print(f"✅ Table key-value pairs: {len(table_kv)}")
+
+    ocr_kv = extract_ocr_kv(pdf_path)
+    print(f"✅ OCR-based key-value pairs: {len(ocr_kv)}")
+
+    # Merge all and remove duplicates
+    all_kv = list({(k, v) for k, v in (text_kv + table_kv + ocr_kv)})
+    print(f"📊 Total unique key-value pairs: {len(all_kv)}\n")
+
+    for key, value in all_kv:
+        print(f"{key} -> {value}")
+
+    return all_kv
+
+if __name__ == "__main__":
+    # Change this to your PDF file
+    pdf_file = "your_form.pdf"
+    if os.path.exists(pdf_file):
+        extract_all(pdf_file)
+    else:
+        print("❌ PDF file not found. Update the 'pdf_file' path.")
