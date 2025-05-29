@@ -1,8 +1,9 @@
 import fitz  # PyMuPDF
 import pdfplumber
-from pdf2image import convert_from_path
 import pytesseract
+from PIL import Image
 import re
+import io
 import os
 
 def extract_text_kv(pdf_path):
@@ -10,7 +11,6 @@ def extract_text_kv(pdf_path):
     kv_pairs = []
     for page in doc:
         text = page.get_text()
-        # Matches: Key : Value (with optional whitespace)
         pairs = re.findall(r'([\w\s]+?)\s*:\s*([\w\s]+)', text)
         kv_pairs.extend([(k.strip(), v.strip()) for k, v in pairs])
     return kv_pairs
@@ -26,10 +26,12 @@ def extract_table_kv(pdf_path):
                         kv_pairs.append((row[0].strip(), row[1].strip()))
     return kv_pairs
 
-def extract_ocr_kv(pdf_path):
-    images = convert_from_path(pdf_path)
+def extract_ocr_kv_with_pymupdf(pdf_path):
+    doc = fitz.open(pdf_path)
     kv_pairs = []
-    for image in images:
+    for page in doc:
+        pix = page.get_pixmap(dpi=300)  # render page as image at high resolution
+        image = Image.open(io.BytesIO(pix.tobytes("png")))
         text = pytesseract.image_to_string(image)
         pairs = re.findall(r'([\w\s]+?)\s*:\s*([\w\s]+)', text)
         kv_pairs.extend([(k.strip(), v.strip()) for k, v in pairs])
@@ -44,8 +46,8 @@ def extract_all(pdf_path):
     table_kv = extract_table_kv(pdf_path)
     print(f"✅ Table key-value pairs: {len(table_kv)}")
 
-    ocr_kv = extract_ocr_kv(pdf_path)
-    print(f"✅ OCR-based key-value pairs: {len(ocr_kv)}")
+    ocr_kv = extract_ocr_kv_with_pymupdf(pdf_path)
+    print(f"✅ OCR-based key-value pairs (without Poppler): {len(ocr_kv)}")
 
     # Merge all and remove duplicates
     all_kv = list({(k, v) for k, v in (text_kv + table_kv + ocr_kv)})
@@ -57,7 +59,6 @@ def extract_all(pdf_path):
     return all_kv
 
 if __name__ == "__main__":
-    # Change this to your PDF file
     pdf_file = "your_form.pdf"
     if os.path.exists(pdf_file):
         extract_all(pdf_file)
