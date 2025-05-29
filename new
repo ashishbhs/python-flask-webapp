@@ -1,77 +1,73 @@
-import fitz  # PyMuPDF
-import pdfplumber
 import re
-import os
+import json
+import PyPDF2
 
-def extract_text_kv(pdf_path):
-    doc = fitz.open(pdf_path)
-    kv_pairs = []
-    for page in doc:
-        text = page.get_text()
-        pairs = re.findall(r'([\w\s]+?)\s*:\s*([\w\s]+)', text)
-        kv_pairs.extend([(k.strip(), v.strip()) for k, v in pairs])
-    return kv_pairs
+def extract_text_from_pdf(pdf_path):
+    """Extract raw text from a text-based PDF."""
+    try:
+        with open(pdf_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+            return text
+    except Exception as e:
+        print(f"Error reading PDF: {e}")
+        return None
 
-def extract_table_dicts(pdf_path):
-    all_rows = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                if not table or len(table) < 2:
-                    continue  # Need at least headers + 1 row
-                headers = table[0]
-                for row in table[1:]:
-                    if len(row) != len(headers):
-                        continue
-                    row_dict = {}
-                    for i in range(len(headers)):
-                        header = headers[i].strip() if headers[i] else f"Column_{i+1}"
-                        cell = row[i].strip() if row[i] else ""
-                        row_dict[header] = cell
-                    all_rows.append(row_dict)
-    return all_rows
+def extract_form_data(raw_text):
+    """Parse raw text to extract question-answer pairs from tables and user-entered boxes."""
+    result = {}
+    
+    # Normalize text: replace multiple spaces/tabs with single space, remove extra newlines
+    normalized_text = re.sub(r'\s+', ' ', raw_text).strip()
+    
+    # Patterns to match various formats:
+    # 1. "Question: Answer" or "Question - Answer"
+    # 2. Table-like: "Question Answer" (separated by spaces, assuming table columns)
+    # 3. User-entered boxes: "Question [Answer]" or "Question {Answer}"
+    patterns = [
+        r'(\d*\.?\s?[^:?-]+?)\s*[:|-]\s*([^\n]+)',  # Question: Answer
+        r'(\d*\.?\s?[^:\[\{]+?)\s*\[\s*([^\]\n]+)\s*\]',  # Question [Answer]
+        r'(\d*\.?\s?[^:\[\{]+?)\s*\{\s*([^\}\n]+)\s*\}',  # Question {Answer}
+        r'(\d*\.?\s?[^:?\s][^\n]+?)\s{2,}(\S[^\n]+)'  # Table: Question  Answer (multiple spaces)
+    ]
+    
+    # Try each pattern to extract question-answer pairs
+    for pattern in patterns:
+        matches = re.findall(pattern, normalized_text, re.MULTILINE)
+        for question, answer in matches:
+            # Clean question and answer
+            question = question.strip()
+            answer = answer.strip()
+            
+            # Normalize question to use as a key
+            key = re.sub(r'^\d*\.?\s*', '', question).lower().replace(' ', '_').replace('?', '')
+            
+            # Store in dictionary (skip if key already exists to avoid duplicates)
+            if key not in result:
+                result[key] = answer
+    
+    return result
 
-def extract_checkbox_fields(pdf_path):
-    doc = fitz.open(pdf_path)
-    checkbox_data = []
-    for page in doc:
-        widgets = page.widgets()
-        if not widgets:
-            continue
-        for widget in widgets:
-            if widget.field_type == fitz.PDF_WIDGET_TYPE_CHECKBOX:
-                label = widget.field_name or "Unnamed"
-                value = widget.field_value
-                state = "☑️ Checked" if value == "Yes" else "⬜ Unchecked"
-                checkbox_data.append((label, state))
-    return checkbox_data
-
-def extract_all(pdf_path):
-    print(f"📄 Processing PDF: {pdf_path}")
-
-    text_kv = extract_text_kv(pdf_path)
-    print(f"✅ Text-based key-value pairs: {len(text_kv)}")
-
-    table_data = extract_table_dicts(pdf_path)
-    print(f"✅ Structured table rows: {len(table_data)}")
-
-    checkbox_kv = extract_checkbox_fields(pdf_path)
-    print(f"✅ Checkbox fields: {len(checkbox_kv)}")
-
-    print("\n🧾 Extracted Key-Value Pairs:")
-    for key, value in text_kv + checkbox_kv:
-        print(f"{key} -> {value}")
-
-    print("\n📊 Extracted Table Rows:")
-    for i, row in enumerate(table_data, 1):
-        print(f"Row {i}: {row}")
-
-    return text_kv, table_data, checkbox_kv
-
+# Example usage
 if __name__ == "__main__":
-    pdf_file = "your_form.pdf"  # Change to your PDF file path
-    if os.path.exists(pdf_file):
-        extract_all(pdf_file)
+    # Path to your PDF file
+    pdf_path = "path/to/your/form.pdf"  # Replace with your PDF file path
+    
+    # Extract raw text from PDF
+    raw_text = extract_text_from_pdf(pdf_path)
+    
+    if raw_text:
+        # Extract key-value pairs
+        data = extract_form_data(raw_text)
+        
+        # Print raw text for debugging
+        print("Raw Text Extracted from PDF:")
+        print(raw_text)
+        print("\nExtracted Key-Value Pairs:")
+        print(json.dumps(data, indent=2))
     else:
-        print("❌ PDF file not found. Update the 'pdf_file' path.")
+        print("Failed to extract text from PDF.")
