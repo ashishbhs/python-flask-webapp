@@ -1,73 +1,253 @@
-import re
-import json
 import PyPDF2
+import pdfplumber
+import re
+from typing import Dict, List, Any
+import pandas as pd
 
-def extract_text_from_pdf(pdf_path):
-    """Extract raw text from a text-based PDF."""
-    try:
-        with open(pdf_path, 'rb') as file:
-            reader = PyPDF2.PdfReader(file)
-            text = ""
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-            return text
-    except Exception as e:
-        print(f"Error reading PDF: {e}")
-        return None
-
-def extract_form_data(raw_text):
-    """Parse raw text to extract question-answer pairs from tables and user-entered boxes."""
-    result = {}
-    
-    # Normalize text: replace multiple spaces/tabs with single space, remove extra newlines
-    normalized_text = re.sub(r'\s+', ' ', raw_text).strip()
-    
-    # Patterns to match various formats:
-    # 1. "Question: Answer" or "Question - Answer"
-    # 2. Table-like: "Question Answer" (separated by spaces, assuming table columns)
-    # 3. User-entered boxes: "Question [Answer]" or "Question {Answer}"
-    patterns = [
-        r'(\d*\.?\s?[^:?-]+?)\s*[:|-]\s*([^\n]+)',  # Question: Answer
-        r'(\d*\.?\s?[^:\[\{]+?)\s*\[\s*([^\]\n]+)\s*\]',  # Question [Answer]
-        r'(\d*\.?\s?[^:\[\{]+?)\s*\{\s*([^\}\n]+)\s*\}',  # Question {Answer}
-        r'(\d*\.?\s?[^:?\s][^\n]+?)\s{2,}(\S[^\n]+)'  # Table: Question  Answer (multiple spaces)
-    ]
-    
-    # Try each pattern to extract question-answer pairs
-    for pattern in patterns:
-        matches = re.findall(pattern, normalized_text, re.MULTILINE)
-        for question, answer in matches:
-            # Clean question and answer
-            question = question.strip()
-            answer = answer.strip()
-            
-            # Normalize question to use as a key
-            key = re.sub(r'^\d*\.?\s*', '', question).lower().replace(' ', '_').replace('?', '')
-            
-            # Store in dictionary (skip if key already exists to avoid duplicates)
-            if key not in result:
-                result[key] = answer
-    
-    return result
-
-# Example usage
-if __name__ == "__main__":
-    # Path to your PDF file
-    pdf_path = "path/to/your/form.pdf"  # Replace with your PDF file path
-    
-    # Extract raw text from PDF
-    raw_text = extract_text_from_pdf(pdf_path)
-    
-    if raw_text:
-        # Extract key-value pairs
-        data = extract_form_data(raw_text)
+class PDFFormExtractor:
+    def __init__(self, pdf_path: str):
+        self.pdf_path = pdf_path
         
-        # Print raw text for debugging
-        print("Raw Text Extracted from PDF:")
-        print(raw_text)
-        print("\nExtracted Key-Value Pairs:")
-        print(json.dumps(data, indent=2))
-    else:
-        print("Failed to extract text from PDF.")
+    def extract_form_fields(self) -> Dict[str, Any]:
+        """Extract fillable form fields from PDF"""
+        form_data = {}
+        
+        try:
+            with open(self.pdf_path, 'rb') as file:
+                pdf_reader = PyPDF2.PdfReader(file)
+                
+                # Check if PDF has form fields
+                if '/AcroForm' in pdf_reader.trailer['/Root']:
+                    form = pdf_reader.trailer['/Root']['/AcroForm']
+                    
+                    # Extract form fields
+                    if '/Fields' in form:
+                        fields = form['/Fields']
+                        for field in fields:
+                            field_obj = field.get_object()
+                            if '/T' in field_obj:  # Field name
+                                field_name = field_obj['/T']
+                                field_value = ""
+                                
+                                # Get field value
+                                if '/V' in field_obj:
+                                    field_value = field_obj['/V']
+                                elif '/DV' in field_obj:  # Default value
+                                    field_value = field_obj['/DV']
+                                
+                                # Handle different field types
+                                field_type = field_obj.get('/FT', 'Unknown')
+                                if field_type == '/Btn':  # Button/Checkbox
+                                    field_value = bool(field_value) if field_value else False
+                                
+                                form_data[str(field_name)] = str(field_value) if field_value else ""
+                
+        except Exception as e:
+            print(f"Error extracting form fields: {e}")
+            
+        return form_data
+    
+    def extract_text_with_coordinates(self) -> List[Dict]:
+        """Extract text with position information for column detection"""
+        text_elements = []
+        
+        try:
+            with pdfplumber.open(self.pdf_path) as pdf:
+                for page_num, page in enumerate(pdf.pages):
+                    # Extract text with bounding boxes
+                    words = page.extract_words()
+                    
+                    for word in words:
+                        text_elements.append({
+                            'page': page_num + 1,
+                            'text': word['text'],
+                            'x0': word['x0'],
+                            'y0': word['y0'],
+                            'x1': word['x1'],
+                            'y1': word['y1'],
+                            'width': word['x1'] - word['x0'],
+                            'height': word['y1'] - word['y0']
+                        })
+                        
+        except Exception as e:
+            print(f"Error extracting text coordinates: {e}")
+            
+        return text_elements
+    
+    def detect_columns_and_pairs(self, text_elements: List[Dict], 
+                                column_threshold: float = 200) -> Dict[str, str]:
+        """Detect question-answer pairs based on column positions"""
+        pairs = {}
+        
+        # Group text by page and y-coordinate (rows)
+        pages = {}
+        for element in text_elements:
+            page_num = element['page']
+            if page_num not in pages:
+                pages[page_num] = []
+            pages[page_num].append(element)
+        
+        for page_num, elements in pages.items():
+            # Sort by y-coordinate (top to bottom)
+            elements.sort(key=lambda x: -x['y0'])
+            
+            # Group elements by approximate y-coordinate (same row)
+            rows = []
+            current_row = []
+            last_y = None
+            
+            for element in elements:
+                if last_y is None or abs(element['y0'] - last_y) < 10:  # Same row
+                    current_row.append(element)
+                else:
+                    if current_row:
+                        rows.append(current_row)
+                    current_row = [element]
+                last_y = element['y0']
+            
+            if current_row:
+                rows.append(current_row)
+            
+            # For each row, separate left and right columns
+            for row in rows:
+                if len(row) >= 2:
+                    # Sort by x-coordinate (left to right)
+                    row.sort(key=lambda x: x['x0'])
+                    
+                    # Find potential column break
+                    left_column = []
+                    right_column = []
+                    
+                    for element in row:
+                        if element['x0'] < column_threshold:
+                            left_column.append(element)
+                        else:
+                            right_column.append(element)
+                    
+                    if left_column and right_column:
+                        # Combine text in each column
+                        left_text = ' '.join([elem['text'] for elem in left_column])
+                        right_text = ' '.join([elem['text'] for elem in right_column])
+                        
+                        # Clean and store as key-value pair
+                        left_text = left_text.strip()
+                        right_text = right_text.strip()
+                        
+                        if left_text and right_text:
+                            pairs[left_text] = right_text
+        
+        return pairs
+    
+    def extract_checkboxes(self) -> Dict[str, bool]:
+        """Extract checkbox states"""
+        checkboxes = {}
+        
+        try:
+            with pdfplumber.open(self.pdf_path) as pdf:
+                for page in pdf.pages:
+                    # Look for checkbox-like characters or symbols
+                    text = page.extract_text()
+                    
+                    # Common checkbox patterns
+                    checkbox_patterns = [
+                        r'☐\s*([^☐☑\n]+)',  # Empty checkbox
+                        r'☑\s*([^☐☑\n]+)',  # Checked checkbox
+                        r'\[\s*\]\s*([^\[\]\n]+)',  # [ ] format
+                        r'\[x\]\s*([^\[\]\n]+)',   # [x] format
+                        r'\[X\]\s*([^\[\]\n]+)',   # [X] format
+                    ]
+                    
+                    for pattern in checkbox_patterns:
+                        matches = re.findall(pattern, text)
+                        for match in matches:
+                            checkbox_name = match.strip()
+                            # Determine if checked based on pattern
+                            is_checked = '☑' in pattern or '[x]' in pattern or '[X]' in pattern
+                            checkboxes[checkbox_name] = is_checked
+                            
+        except Exception as e:
+            print(f"Error extracting checkboxes: {e}")
+            
+        return checkboxes
+    
+    def extract_all_data(self) -> Dict[str, Any]:
+        """Extract all form data including fields, text pairs, and checkboxes"""
+        print("Extracting PDF form data...")
+        
+        # Extract fillable form fields
+        form_fields = self.extract_form_fields()
+        print(f"Found {len(form_fields)} form fields")
+        
+        # Extract text with coordinates for column detection
+        text_elements = self.extract_text_with_coordinates()
+        print(f"Found {len(text_elements)} text elements")
+        
+        # Detect question-answer pairs
+        text_pairs = self.detect_columns_and_pairs(text_elements)
+        print(f"Found {len(text_pairs)} text pairs")
+        
+        # Extract checkboxes
+        checkboxes = self.extract_checkboxes()
+        print(f"Found {len(checkboxes)} checkboxes")
+        
+        # Combine all data
+        all_data = {
+            'form_fields': form_fields,
+            'text_pairs': text_pairs,
+            'checkboxes': checkboxes
+        }
+        
+        return all_data
+    
+    def save_to_csv(self, data: Dict[str, Any], output_file: str = 'extracted_data.csv'):
+        """Save extracted data to CSV"""
+        rows = []
+        
+        # Add form fields
+        for key, value in data['form_fields'].items():
+            rows.append({'Type': 'Form Field', 'Key': key, 'Value': value})
+        
+        # Add text pairs
+        for key, value in data['text_pairs'].items():
+            rows.append({'Type': 'Text Pair', 'Key': key, 'Value': value})
+        
+        # Add checkboxes
+        for key, value in data['checkboxes'].items():
+            rows.append({'Type': 'Checkbox', 'Key': key, 'Value': value})
+        
+        df = pd.DataFrame(rows)
+        df.to_csv(output_file, index=False)
+        print(f"Data saved to {output_file}")
+
+# Usage example
+def main():
+    # Initialize extractor
+    extractor = PDFFormExtractor('your_form.pdf')
+    
+    # Extract all data
+    extracted_data = extractor.extract_all_data()
+    
+    # Print results
+    print("\n=== FORM FIELDS ===")
+    for key, value in extracted_data['form_fields'].items():
+        print(f"{key}: {value}")
+    
+    print("\n=== TEXT PAIRS (Question-Answer) ===")
+    for key, value in extracted_data['text_pairs'].items():
+        print(f"{key}: {value}")
+    
+    print("\n=== CHECKBOXES ===")
+    for key, value in extracted_data['checkboxes'].items():
+        print(f"{key}: {value}")
+    
+    # Save to CSV
+    extractor.save_to_csv(extracted_data)
+    
+    # Return as dictionary for further processing
+    return extracted_data
+
+if __name__ == "__main__":
+    # Install required packages:
+    # pip install PyPDF2 pdfplumber pandas
+    
+    extracted_data = main()
