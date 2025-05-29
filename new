@@ -1,9 +1,6 @@
 import fitz  # PyMuPDF
 import pdfplumber
-import pytesseract
-from PIL import Image
 import re
-import io
 import os
 
 def extract_text_kv(pdf_path):
@@ -15,27 +12,32 @@ def extract_text_kv(pdf_path):
         kv_pairs.extend([(k.strip(), v.strip()) for k, v in pairs])
     return kv_pairs
 
-def extract_table_kv(pdf_path):
-    kv_pairs = []
+def extract_table_dicts(pdf_path):
+    all_rows = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
-                for row in table:
-                    if len(row) == 2 and row[0] and row[1]:
-                        kv_pairs.append((row[0].strip(), row[1].strip()))
-    return kv_pairs
+                if not table:
+                    continue
+                headers = table[0]
+                for row in table[1:]:
+                    if len(row) == len(headers):
+                        row_dict = {headers[i].strip(): row[i].strip() if row[i] else "" for i in range(len(headers))}
+                        all_rows.append(row_dict)
+    return all_rows
 
-def extract_ocr_kv_with_pymupdf(pdf_path):
+def extract_checkbox_fields(pdf_path):
     doc = fitz.open(pdf_path)
-    kv_pairs = []
+    checkbox_data = []
     for page in doc:
-        pix = page.get_pixmap(dpi=300)  # render page as image at high resolution
-        image = Image.open(io.BytesIO(pix.tobytes("png")))
-        text = pytesseract.image_to_string(image)
-        pairs = re.findall(r'([\w\s]+?)\s*:\s*([\w\s]+)', text)
-        kv_pairs.extend([(k.strip(), v.strip()) for k, v in pairs])
-    return kv_pairs
+        widgets = page.widgets()
+        for widget in widgets:
+            if widget.field_type == fitz.PDF_WIDGET_TYPE_CHECKBOX:
+                label = widget.field_name or "Unnamed"
+                value = widget.field_value
+                checkbox_data.append((label, "☑️ Checked" if value == "Yes" else "⬜ Unchecked"))
+    return checkbox_data
 
 def extract_all(pdf_path):
     print(f"📄 Processing PDF: {pdf_path}")
@@ -43,20 +45,21 @@ def extract_all(pdf_path):
     text_kv = extract_text_kv(pdf_path)
     print(f"✅ Text-based key-value pairs: {len(text_kv)}")
 
-    table_kv = extract_table_kv(pdf_path)
-    print(f"✅ Table key-value pairs: {len(table_kv)}")
+    table_data = extract_table_dicts(pdf_path)
+    print(f"✅ Structured table rows: {len(table_data)}")
 
-    ocr_kv = extract_ocr_kv_with_pymupdf(pdf_path)
-    print(f"✅ OCR-based key-value pairs (without Poppler): {len(ocr_kv)}")
+    checkbox_kv = extract_checkbox_fields(pdf_path)
+    print(f"✅ Checkbox fields: {len(checkbox_kv)}")
 
-    # Merge all and remove duplicates
-    all_kv = list({(k, v) for k, v in (text_kv + table_kv + ocr_kv)})
-    print(f"📊 Total unique key-value pairs: {len(all_kv)}\n")
-
-    for key, value in all_kv:
+    print("\n🧾 Extracted Key-Value Pairs:")
+    for key, value in text_kv + checkbox_kv:
         print(f"{key} -> {value}")
 
-    return all_kv
+    print("\n📊 Extracted Table Rows:")
+    for i, row in enumerate(table_data, 1):
+        print(f"Row {i}: {row}")
+
+    return text_kv, table_data, checkbox_kv
 
 if __name__ == "__main__":
     pdf_file = "your_form.pdf"
