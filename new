@@ -1,95 +1,187 @@
-import re
-import json
-from spire.pdf import PdfDocument, PdfTableExtractor, PdfFormWidget
-
-def extract_form_fields(pdf):
-    """Extract data from user-enterable form fields (e.g., text boxes, checkboxes)."""
-    result = {}
+def fetch_access_token(requests_pkcs12):
     try:
-        # Get the PDF form
-        form = PdfFormWidget(pdf.Form)
-        # Check if form fields exist by checking FieldsWidget count
-        if form.FieldsWidget.Count > 0:
-            for i in range(form.FieldsWidget.Count):
-                field = form.FieldsWidget.get_Item(i)
-                field_name = field.Name.strip() if field.Name else ""
-                field_value = field.Value.strip() if field.Value else ""
-                if field_name and field_value:  # Only include non-empty fields
-                    # Normalize field name to use as a key
-                    key = re.sub(r'[^a-zA-Z0-9\s]', '', field_name).lower().replace(' ', '_')
-                    result[key] = field_value
+        response = requests_pkcs12.post(
+            URL_AUTH,
+            auth=(USERNAME, PASSWORD),
+            pkcs12_filename=PFX_PATH,
+            pkcs12_password=PFX_PASSPHRASE,
+            verify=VERIFY_SSL,
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json().get("access_token")
     except Exception as e:
-        print(f"Error extracting form fields: {e}")
-    return result
-
-def extract_table_data(pdf):
-    """Extract data from tables and attempt to form key-value pairs."""
-    result = {}
-    try:
-        extractor = PdfTableExtractor(pdf)
-        for page_index in range(pdf.Pages.Count):
-            page = pdf.Pages[page_index]
-            tables = extractor.ExtractTable(page_index)
-            if tables is not None:
-                for table_index, table in enumerate(tables):
-                    row_count = table.GetRowCount()
-                    col_count = table.GetColumnCount()
-                    
-                    # Try row-based tables (labels in first column)
-                    for row in range(row_count):
-                        if col_count > 1:  # Ensure at least 2 columns for key-value
-                            key = table.GetText(row, 0).strip()
-                            value = table.GetText(row, 1).strip() if col_count > 1 else ""
-                            if key and value:  # Only include non-empty pairs
-                                # Normalize key
-                                key = re.sub(r'^\d*\.?\s*', '', key).lower().replace(' ', '_').replace('?', '')
-                                result[key] = value
-                        
-                    # Try column-based tables (labels in first row)
-                    if row_count > 1:  # Ensure at least 2 rows for header and data
-                        for col in range(col_count):
-                            key = table.GetText(0, col).strip()
-                            value = table.GetText(1, col).strip() if row_count > 1 else ""
-                            if key and value:  # Only include non-empty pairs
-                                # Normalize key
-                                key = re.sub(r'^\d*\.?\s*', '', key).lower().replace(' ', '_').replace('?', '')
-                                result[key] = value
-    except Exception as e:
-        print(f"Error extracting table data: {e}")
-    return result
-
-def extract_form_data(pdf_path):
-    """Extract key-value pairs from form fields and tables in a PDF."""
-    result = {}
-    
-    # Load the PDF document
-    pdf = PdfDocument()
-    try:
-        pdf.LoadFromFile(pdf_path)
-        
-        # Extract form fields (user-enterable boxes)
-        form_data = extract_form_fields(pdf)
-        result.update(form_data)
-        
-        # Extract table data
-        table_data = extract_table_data(pdf)
-        result.update(table_data)
-        
-    except Exception as e:
-        print(f"Error processing PDF: {e}")
-    finally:
-        pdf.Close()
-    
-    return result
-
-# Example usage
-if __name__ == "__main__":
-    # Path to your PDF file
-    pdf_path = "path/to/your/form.pdf"  # Replace with your PDF file path
-    
-    # Extract key-value pairs
-    data = extract_form_data(pdf_path)
-    
-    # Print extracted key-value pairs
-    print("Extracted Key-Value Pairs:")
-    print(json.dumps(data, indent=2))
+        print(f"Auth request failed: {e}", file=sys.stderr)
+        return None
+ 
+def generate_process_uids(requests_pkcs12, token, count):
+    uids = []
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json"
+    }
+    for _ in range(count):
+        try:
+            response = requests_pkcs12.post(
+                URL_PROCESSING,
+                headers=headers,
+                pkcs12_filename=PFX_PATH,
+                pkcs12_password=PFX_PASSPHRASE,
+                verify=VERIFY_SSL,
+                timeout=30
+            )
+            response.raise_for_status()
+            process_uid = response.json().get("processUid")
+            if process_uid:
+                uids.append(process_uid)
+                print(f"Generated processUid: {process_uid}")
+        except Exception as e:
+            print(f"Failed to generate processUid: {e}", file=sys.stderr)
+    return uids
+ 
+def check_status(requests_pkcs12, token, process_uid):
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json"
+    }
+    for attempt in range(MAX_RETRIES):
+        try:
+            start_time = time.time()
+            response = requests_pkcs12.get(
+                URL_STATUS.format(processUid=process_uid),
+                headers=headers,
+                pkcs12_filename=PFX_PATH,
+                pkcs12_password=PFX_PASSPHRASE,
+                verify=VERIFY_SSL,
+                timeout=30
+            )
+            response.raise_for_status()
+            elapsed = time.time() - start_time
+            data = response.json()
+            status = data.get("status", "Unknown")
+            return {
+                "success": True,
+                "status": status,
+                "completed": status == "Completed",
+                "attempt": attempt + 1,
+                "time": elapsed,
+                "data": data
+            }
+        except Exception as e:
+            elapsed = time.time() - start_time
+            return {
+                "success": False,
+                "error": str(e),
+                "time": elapsed,
+                "attempt": attempt + 1
+            }
+        time.sleep(POLL_INTERVAL)
+    return {
+        "success": False,
+        "error": f"Max retries ({MAX_RETRIES}) exceeded",
+        "time": 0,
+        "attempt": MAX_RETRIES
+    }
+ 
+def run_performance_test(requests_pkcs12):
+    test_start_time = time.time()
+    # Step 1: Get single access token
+    token = fetch_access_token(requests_pkcs12)
+    if not token:
+        print("Failed to obtain access token", file=sys.stderr)
+        return None
+    # Step 2: Generate multiple processUids (one per thread)
+    process_uids = generate_process_uids(requests_pkcs12, token, MAX_THREADS)
+    if not process_uids:
+        print("Failed to generate any processUids", file=sys.stderr)
+        return None
+    # Initialize results
+    results = {
+        "total_requests": 0,
+        "successful_requests": 0,
+        "failed_requests": 0,
+        "completed_processes": 0,
+        "incomplete_processes": 0,
+        "response_times": [],
+        "process_uids": process_uids,
+        "test_start_time": test_start_time,
+        "test_end_time": 0,
+        "auth_time": time.time() - test_start_time,
+        "detailed_results": []
+    }
+    print(f"Starting performance test with {len(process_uids)} processUids for {TEST_DURATION} seconds...")
+    def worker(process_uid):
+        nonlocal results, token
+        while time.time() - results["test_start_time"] < TEST_DURATION + results["auth_time"]:
+            result = check_status(requests_pkcs12, token, process_uid)
+            results["total_requests"] += 1
+            results["detailed_results"].append({
+                "process_uid": process_uid,
+                "result": result
+            })
+            if result["success"]:
+                results["successful_requests"] += 1
+                results["response_times"].append(result["time"])
+                if result.get("completed", False):
+                    results["completed_processes"] += 1
+                else:
+                    results["incomplete_processes"] += 1
+            else:
+                results["failed_requests"] += 1
+            # Don't hammer the server too hard
+            time.sleep(0.1)
+    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
+        futures = [executor.submit(worker, uid) for uid in process_uids]
+        for future in futures:
+            future.result()
+    results["test_end_time"] = time.time()
+    return results
+ 
+def analyze_results(results):
+    if not results:
+        return None
+    actual_duration = results["test_end_time"] - results["test_start_time"]
+    requests_per_second = results["total_requests"] / actual_duration
+    error_rate = (results["failed_requests"] / results["total_requests"]) * 100 if results["total_requests"] > 0 else 0
+    completion_rate = (results["completed_processes"] / len(results["process_uids"])) * 100 if results["process_uids"] else 0
+    if results["response_times"]:
+        avg_response_time = statistics.mean(results["response_times"])
+        min_response_time = min(results["response_times"])
+        max_response_time = max(results["response_times"])
+        percentile_95 = statistics.quantiles(results["response_times"], n=100)[-1]
+    else:
+        avg_response_time = min_response_time = max_response_time = percentile_95 = 0
+    return {
+        "total_test_duration_seconds": actual_duration,
+        "auth_time_seconds": results["auth_time"],
+        "total_process_uids": len(results["process_uids"]),
+        "total_requests": results["total_requests"],
+        "successful_requests": results["successful_requests"],
+        "failed_requests": results["failed_requests"],
+        "completed_processes": results["completed_processes"],
+        "incomplete_processes": results["incomplete_processes"],
+        "completion_rate_percent": completion_rate,
+        "error_rate_percent": error_rate,
+        "requests_per_second": requests_per_second,
+        "avg_response_time_seconds": avg_response_time,
+        "min_response_time_seconds": min_response_time,
+        "max_response_time_seconds": max_response_time,
+        "95th_percentile_seconds": percentile_95
+    }
+ 
+def main():
+    requests_pkcs12 = ensure_requests_pkcs12()
+    test_results = run_performance_test(requests_pkcs12)
+    if not test_results:
+        print("Performance test failed", file=sys.stderr)
+        return
+    analysis = analyze_results(test_results)
+    print("\nPerformance Test Results:")
+    print(json.dumps(analysis, indent=2))
+    # Print first few detailed results for inspection
+    print("\nSample Detailed Results:")
+    for i, detail in enumerate(test_results["detailed_results"][:3]):
+        print(f"\nResult {i+1} for processUid {detail['process_uid']}:")
+        print(json.dumps(detail["result"], indent=2))
+    return analysis
+ 
