@@ -18,13 +18,18 @@ def extract_table_dicts(pdf_path):
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
-                if not table:
-                    continue
+                if not table or len(table) < 2:
+                    continue  # Need at least headers + 1 row
                 headers = table[0]
                 for row in table[1:]:
-                    if len(row) == len(headers):
-                        row_dict = {headers[i].strip(): row[i].strip() if row[i] else "" for i in range(len(headers))}
-                        all_rows.append(row_dict)
+                    if len(row) != len(headers):
+                        continue
+                    row_dict = {}
+                    for i in range(len(headers)):
+                        header = headers[i].strip() if headers[i] else f"Column_{i+1}"
+                        cell = row[i].strip() if row[i] else ""
+                        row_dict[header] = cell
+                    all_rows.append(row_dict)
     return all_rows
 
 def extract_checkbox_fields(pdf_path):
@@ -32,11 +37,14 @@ def extract_checkbox_fields(pdf_path):
     checkbox_data = []
     for page in doc:
         widgets = page.widgets()
+        if not widgets:
+            continue
         for widget in widgets:
             if widget.field_type == fitz.PDF_WIDGET_TYPE_CHECKBOX:
                 label = widget.field_name or "Unnamed"
                 value = widget.field_value
-                checkbox_data.append((label, "☑️ Checked" if value == "Yes" else "⬜ Unchecked"))
+                state = "☑️ Checked" if value == "Yes" else "⬜ Unchecked"
+                checkbox_data.append((label, state))
     return checkbox_data
 
 def extract_all(pdf_path):
@@ -62,7 +70,7 @@ def extract_all(pdf_path):
     return text_kv, table_data, checkbox_kv
 
 if __name__ == "__main__":
-    pdf_file = "your_form.pdf"
+    pdf_file = "your_form.pdf"  # Change to your PDF file path
     if os.path.exists(pdf_file):
         extract_all(pdf_file)
     else:
