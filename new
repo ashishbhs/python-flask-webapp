@@ -1,14 +1,13 @@
 import re
 import json
-from spire.pdf import PdfDocument, PdfTableExtractor, PdfPageBase
-from spire.pdf.common import PdfForm
+from spire.pdf import PdfDocument, PdfTableExtractor, PdfFormWidget
 
 def extract_form_fields(pdf):
     """Extract data from user-enterable form fields (e.g., text boxes, checkboxes)."""
     result = {}
     try:
         # Get the PDF form
-        form = PdfForm(pdf)
+        form = PdfFormWidget(pdf.Form)
         if form.IsAvailable():
             for i in range(form.FieldsWidget.Count):
                 field = form.FieldsWidget.get_Item(i)
