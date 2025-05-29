@@ -8,15 +8,16 @@ def extract_form_fields(pdf):
     try:
         # Get the PDF form
         form = PdfFormWidget(pdf.Form)
-        if form.IsAvailable():
+        # Check if form fields exist by checking FieldsWidget count
+        if form.FieldsWidget.Count > 0:
             for i in range(form.FieldsWidget.Count):
                 field = form.FieldsWidget.get_Item(i)
-                field_name = field.Name.strip()
-                field_value = field.Value if field.Value else ""
+                field_name = field.Name.strip() if field.Name else ""
+                field_value = field.Value.strip() if field.Value else ""
                 if field_name and field_value:  # Only include non-empty fields
                     # Normalize field name to use as a key
                     key = re.sub(r'[^a-zA-Z0-9\s]', '', field_name).lower().replace(' ', '_')
-                    result[key] = field_value.strip()
+                    result[key] = field_value
     except Exception as e:
         print(f"Error extracting form fields: {e}")
     return result
@@ -34,7 +35,6 @@ def extract_table_data(pdf):
                     row_count = table.GetRowCount()
                     col_count = table.GetColumnCount()
                     
-                    # Assume first row or column contains labels (questions)
                     # Try row-based tables (labels in first column)
                     for row in range(row_count):
                         if col_count > 1:  # Ensure at least 2 columns for key-value
