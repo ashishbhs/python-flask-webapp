@@ -1,187 +1,65 @@
-def fetch_access_token(requests_pkcs12):
-    try:
-        response = requests_pkcs12.post(
-            URL_AUTH,
-            auth=(USERNAME, PASSWORD),
-            pkcs12_filename=PFX_PATH,
-            pkcs12_password=PFX_PASSPHRASE,
-            verify=VERIFY_SSL,
-            timeout=30
-        )
-        response.raise_for_status()
-        return response.json().get("access_token")
-    except Exception as e:
-        print(f"Auth request failed: {e}", file=sys.stderr)
-        return None
- 
-def generate_process_uids(requests_pkcs12, token, count):
-    uids = []
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json"
-    }
-    for _ in range(count):
-        try:
-            response = requests_pkcs12.post(
-                URL_PROCESSING,
-                headers=headers,
-                pkcs12_filename=PFX_PATH,
-                pkcs12_password=PFX_PASSPHRASE,
-                verify=VERIFY_SSL,
-                timeout=30
-            )
-            response.raise_for_status()
-            process_uid = response.json().get("processUid")
-            if process_uid:
-                uids.append(process_uid)
-                print(f"Generated processUid: {process_uid}")
-        except Exception as e:
-            print(f"Failed to generate processUid: {e}", file=sys.stderr)
-    return uids
- 
-def check_status(requests_pkcs12, token, process_uid):
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json"
-    }
-    for attempt in range(MAX_RETRIES):
-        try:
-            start_time = time.time()
-            response = requests_pkcs12.get(
-                URL_STATUS.format(processUid=process_uid),
-                headers=headers,
-                pkcs12_filename=PFX_PATH,
-                pkcs12_password=PFX_PASSPHRASE,
-                verify=VERIFY_SSL,
-                timeout=30
-            )
-            response.raise_for_status()
-            elapsed = time.time() - start_time
-            data = response.json()
-            status = data.get("status", "Unknown")
-            return {
-                "success": True,
-                "status": status,
-                "completed": status == "Completed",
-                "attempt": attempt + 1,
-                "time": elapsed,
-                "data": data
+import net.sourceforge.tess4j.*;
+import net.sourceforge.tess4j.util.LoadLibs;
+import org.apache.pdfbox.pdmodel.PDDocument;
+import org.apache.pdfbox.rendering.PDFRenderer;
+
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.File;
+import java.util.*;
+import java.awt.Rectangle;
+
+public class PDFOCRWithSpacing {
+
+    public static void main(String[] args) {
+        String pdfPath = "filled_form.pdf";
+        String tessDataPath = "tessdata";
+
+        try (PDDocument document = PDDocument.load(new File(pdfPath))) {
+            PDFRenderer renderer = new PDFRenderer(document);
+            ITesseract tesseract = new Tesseract();
+            tesseract.setDatapath(tessDataPath);
+            tesseract.setLanguage("eng");
+
+            for (int page = 0; page < document.getNumberOfPages(); page++) {
+                BufferedImage image = renderer.renderImageWithDPI(page, 300);
+
+                List<Word> words = tesseract.getWords(image, ITessAPI.TessPageIteratorLevel.RIL_WORD);
+                words.sort(Comparator.comparingInt(w -> w.getBoundingBox().y)); // sort top to bottom
+
+                Map<Integer, List<Word>> lines = new TreeMap<>();
+
+                for (Word word : words) {
+                    int y = word.getBoundingBox().y;
+                    lines.computeIfAbsent(y, k -> new ArrayList<>()).add(word);
+                }
+
+                System.out.println("----- Page " + (page + 1) + " -----");
+
+                for (List<Word> line : lines.values()) {
+                    line.sort(Comparator.comparingInt(w -> w.getBoundingBox().x)); // left to right
+                    StringBuilder lineBuilder = new StringBuilder();
+
+                    int prevX = -1;
+                    for (Word word : line) {
+                        int currX = word.getBoundingBox().x;
+
+                        // Add spacing based on distance
+                        if (prevX != -1 && currX - prevX > 50) {
+                            lineBuilder.append("    "); // simulate spacing
+                        } else {
+                            lineBuilder.append(" ");
+                        }
+
+                        lineBuilder.append(word.getText());
+                        prevX = word.getBoundingBox().x + word.getBoundingBox().width;
+                    }
+                    System.out.println(lineBuilder.toString().trim());
+                }
+
             }
-        except Exception as e:
-            elapsed = time.time() - start_time
-            return {
-                "success": False,
-                "error": str(e),
-                "time": elapsed,
-                "attempt": attempt + 1
-            }
-        time.sleep(POLL_INTERVAL)
-    return {
-        "success": False,
-        "error": f"Max retries ({MAX_RETRIES}) exceeded",
-        "time": 0,
-        "attempt": MAX_RETRIES
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
- 
-def run_performance_test(requests_pkcs12):
-    test_start_time = time.time()
-    # Step 1: Get single access token
-    token = fetch_access_token(requests_pkcs12)
-    if not token:
-        print("Failed to obtain access token", file=sys.stderr)
-        return None
-    # Step 2: Generate multiple processUids (one per thread)
-    process_uids = generate_process_uids(requests_pkcs12, token, MAX_THREADS)
-    if not process_uids:
-        print("Failed to generate any processUids", file=sys.stderr)
-        return None
-    # Initialize results
-    results = {
-        "total_requests": 0,
-        "successful_requests": 0,
-        "failed_requests": 0,
-        "completed_processes": 0,
-        "incomplete_processes": 0,
-        "response_times": [],
-        "process_uids": process_uids,
-        "test_start_time": test_start_time,
-        "test_end_time": 0,
-        "auth_time": time.time() - test_start_time,
-        "detailed_results": []
-    }
-    print(f"Starting performance test with {len(process_uids)} processUids for {TEST_DURATION} seconds...")
-    def worker(process_uid):
-        nonlocal results, token
-        while time.time() - results["test_start_time"] < TEST_DURATION + results["auth_time"]:
-            result = check_status(requests_pkcs12, token, process_uid)
-            results["total_requests"] += 1
-            results["detailed_results"].append({
-                "process_uid": process_uid,
-                "result": result
-            })
-            if result["success"]:
-                results["successful_requests"] += 1
-                results["response_times"].append(result["time"])
-                if result.get("completed", False):
-                    results["completed_processes"] += 1
-                else:
-                    results["incomplete_processes"] += 1
-            else:
-                results["failed_requests"] += 1
-            # Don't hammer the server too hard
-            time.sleep(0.1)
-    with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-        futures = [executor.submit(worker, uid) for uid in process_uids]
-        for future in futures:
-            future.result()
-    results["test_end_time"] = time.time()
-    return results
- 
-def analyze_results(results):
-    if not results:
-        return None
-    actual_duration = results["test_end_time"] - results["test_start_time"]
-    requests_per_second = results["total_requests"] / actual_duration
-    error_rate = (results["failed_requests"] / results["total_requests"]) * 100 if results["total_requests"] > 0 else 0
-    completion_rate = (results["completed_processes"] / len(results["process_uids"])) * 100 if results["process_uids"] else 0
-    if results["response_times"]:
-        avg_response_time = statistics.mean(results["response_times"])
-        min_response_time = min(results["response_times"])
-        max_response_time = max(results["response_times"])
-        percentile_95 = statistics.quantiles(results["response_times"], n=100)[-1]
-    else:
-        avg_response_time = min_response_time = max_response_time = percentile_95 = 0
-    return {
-        "total_test_duration_seconds": actual_duration,
-        "auth_time_seconds": results["auth_time"],
-        "total_process_uids": len(results["process_uids"]),
-        "total_requests": results["total_requests"],
-        "successful_requests": results["successful_requests"],
-        "failed_requests": results["failed_requests"],
-        "completed_processes": results["completed_processes"],
-        "incomplete_processes": results["incomplete_processes"],
-        "completion_rate_percent": completion_rate,
-        "error_rate_percent": error_rate,
-        "requests_per_second": requests_per_second,
-        "avg_response_time_seconds": avg_response_time,
-        "min_response_time_seconds": min_response_time,
-        "max_response_time_seconds": max_response_time,
-        "95th_percentile_seconds": percentile_95
-    }
- 
-def main():
-    requests_pkcs12 = ensure_requests_pkcs12()
-    test_results = run_performance_test(requests_pkcs12)
-    if not test_results:
-        print("Performance test failed", file=sys.stderr)
-        return
-    analysis = analyze_results(test_results)
-    print("\nPerformance Test Results:")
-    print(json.dumps(analysis, indent=2))
-    # Print first few detailed results for inspection
-    print("\nSample Detailed Results:")
-    for i, detail in enumerate(test_results["detailed_results"][:3]):
-        print(f"\nResult {i+1} for processUid {detail['process_uid']}:")
-        print(json.dumps(detail["result"], indent=2))
-    return analysis
- 
+}
