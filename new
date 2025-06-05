@@ -1,65 +1,27 @@
-import net.sourceforge.tess4j.*;
-import net.sourceforge.tess4j.util.LoadLibs;
-import org.apache.pdfbox.pdmodel.PDDocument;
-import org.apache.pdfbox.rendering.PDFRenderer;
+def compare_json(llm_json, api_json):
+    total_keys = len(api_json)
+    matched_keys = 0
+    mismatches = []
 
-import javax.imageio.ImageIO;
-import java.awt.image.BufferedImage;
-import java.io.File;
-import java.util.*;
-import java.awt.Rectangle;
+    for key, api_value in api_json.items():
+        llm_value = llm_json.get(key, None)
 
-public class PDFOCRWithSpacing {
+        if llm_value == api_value:
+            matched_keys += 1
+        else:
+            mismatches.append({
+                "key": key,
+                "expected (API)": api_value,
+                "found (LLM)": llm_value
+            })
 
-    public static void main(String[] args) {
-        String pdfPath = "filled_form.pdf";
-        String tessDataPath = "tessdata";
+    accuracy = (matched_keys / total_keys) * 100 if total_keys else 0
 
-        try (PDDocument document = PDDocument.load(new File(pdfPath))) {
-            PDFRenderer renderer = new PDFRenderer(document);
-            ITesseract tesseract = new Tesseract();
-            tesseract.setDatapath(tessDataPath);
-            tesseract.setLanguage("eng");
-
-            for (int page = 0; page < document.getNumberOfPages(); page++) {
-                BufferedImage image = renderer.renderImageWithDPI(page, 300);
-
-                List<Word> words = tesseract.getWords(image, ITessAPI.TessPageIteratorLevel.RIL_WORD);
-                words.sort(Comparator.comparingInt(w -> w.getBoundingBox().y)); // sort top to bottom
-
-                Map<Integer, List<Word>> lines = new TreeMap<>();
-
-                for (Word word : words) {
-                    int y = word.getBoundingBox().y;
-                    lines.computeIfAbsent(y, k -> new ArrayList<>()).add(word);
-                }
-
-                System.out.println("----- Page " + (page + 1) + " -----");
-
-                for (List<Word> line : lines.values()) {
-                    line.sort(Comparator.comparingInt(w -> w.getBoundingBox().x)); // left to right
-                    StringBuilder lineBuilder = new StringBuilder();
-
-                    int prevX = -1;
-                    for (Word word : line) {
-                        int currX = word.getBoundingBox().x;
-
-                        // Add spacing based on distance
-                        if (prevX != -1 && currX - prevX > 50) {
-                            lineBuilder.append("    "); // simulate spacing
-                        } else {
-                            lineBuilder.append(" ");
-                        }
-
-                        lineBuilder.append(word.getText());
-                        prevX = word.getBoundingBox().x + word.getBoundingBox().width;
-                    }
-                    System.out.println(lineBuilder.toString().trim());
-                }
-
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
-        }
+    result = {
+        "accuracy_percent": round(accuracy, 2),
+        "total_keys": total_keys,
+        "matched_keys": matched_keys,
+        "mismatched_keys": mismatches
     }
-}
+
+    return result
