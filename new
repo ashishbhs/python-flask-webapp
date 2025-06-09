@@ -14,6 +14,15 @@ from datetime import datetime
 from pathlib import Path
 import os
 import math
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Configuration
 URL_AUTH = "https:///token"
@@ -27,9 +36,9 @@ PFX_PASSPHRASE = ""
 VERIFY_SSL = True
 
 # Test Configuration
-MAX_THREADS = 50    # Number of threads, each performing one flow
+MAX_THREADS = 10    # Reduced to prevent server overload
 TOKEN_REFRESH_TIME = 20  # seconds
-MAX_STATUS_CHECKS = 10  # Maximum number of times to check for "Completed" status
+MAX_STATUS_CHECKS = 150  # Increased to allow ~300s for API completion
 STATUS_CHECK_INTERVAL = 2  # Seconds between status checks
 
 # Output Configuration
@@ -42,6 +51,7 @@ def ensure_requests_pkcs12():
         import requests_pkcs12
         return requests_pkcs12
     except ImportError:
+        logger.info("Installing requests_pkcs12...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "requests_pkcs12"])
         import requests_pkcs12
         return requests_pkcs12
@@ -54,20 +64,24 @@ class TokenManager:
         self.lock = threading.Lock()
         self.refresh_counter = 0
         self.total_tokens_generated = 0
-        self.token_stats = []  # Store token generation metrics
+        self.token_stats = []
     
     def get_token(self):
         with self.lock:
             current_time = time.time()
             if self.token is None or (current_time - self.token_timestamp) > TOKEN_REFRESH_TIME:
+                logger.info("Requesting new token...")
                 token_result = self._fetch_new_token()
                 if token_result["success"]:
                     self.token = token_result["token"]
                     self.token_timestamp = current_time
                     self.refresh_counter += 1
                     self.total_tokens_generated += 1
-                    print(f"New token generated (Total refreshes: {self.refresh_counter})")
+                    logger.info(f"New token generated (Total refreshes: {self.refresh_counter})")
+                else:
+                    logger.error(f"Token generation failed: {token_result.get('error', 'Unknown error')}")
                 return token_result
+            logger.debug("Using cached token")
             return {
                 "token": self.token,
                 "response_time": 0,
@@ -92,15 +106,10 @@ class TokenManager:
                 timeout=30
             )
             elapsed = time.time() - start_time
-            
-            # Calculate request/response sizes
             request_size = len(str(data)) + len(URL_AUTH) + len(USERNAME) + len(PASSWORD)
             response_size = len(response.text)
-            
             response.raise_for_status()
             token_data = response.json()
-            
-            # Record the token generation metrics
             token_result = {
                 "token": token_data.get("access_token"),
                 "response_time": elapsed,
@@ -109,10 +118,9 @@ class TokenManager:
                 "success": True,
                 "from_cache": False
             }
-            
             self.token_stats.append(token_result)
+            logger.debug(f"Token request successful: {elapsed:.2f}s")
             return token_result
-            
         except Exception as e:
             error_result = {
                 "token": None,
@@ -124,7 +132,7 @@ class TokenManager:
                 "from_cache": False
             }
             self.token_stats.append(error_result)
-            print(f"Token generation failed: {str(e)}")
+            logger.error(f"Token generation failed: {str(e)}")
             return error_result
 
 class TestRunner:
@@ -140,6 +148,7 @@ class TestRunner:
     def generate_process_id(self, token):
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         try:
+            logger.info("Generating process ID...")
             start_time = time.time()
             response = self.requests_pkcs12.get(
                 URL_PROCESSING,
@@ -150,14 +159,10 @@ class TestRunner:
                 timeout=30
             )
             elapsed = time.time() - start_time
-            
-            # Calculate request/response sizes
             request_size = len(str(headers)) + len(URL_PROCESSING)
             response_size = len(response.text)
-            
             response.raise_for_status()
             process_id = response.json().get("processUid")
-            
             with self.lock:
                 self.processing_stats.append({
                     "process_id": process_id,
@@ -166,7 +171,7 @@ class TestRunner:
                     "response_size_bytes": response_size,
                     "success": True
                 })
-            
+            logger.info(f"Process ID {process_id} generated: {elapsed:.2f}s")
             return process_id
         except Exception as e:
             with self.lock:
@@ -178,12 +183,13 @@ class TestRunner:
                     "success": False,
                     "error": str(e)
                 })
-            print(f"ProcessID generation failed: {str(e)}")
+            logger.error(f"Process ID generation failed: {str(e)}")
             return None
 
     def check_api_status(self, token, process_id):
         headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
         try:
+            logger.info(f"Checking status for process {process_id}...")
             start_time = time.time()
             response = self.requests_pkcs12.get(
                 URL_API.format(processUid=process_id),
@@ -194,12 +200,9 @@ class TestRunner:
                 timeout=30
             )
             elapsed = time.time() - start_time
-            
-            # Calculate request/response sizes
             request_size = len(str(headers)) + len(URL_API.format(processUid=process_id))
             response_size = len(response.text)
             
-            # First check if response is 200 OK
             if response.status_code != 200:
                 with self.lock:
                     self.api_stats.append({
@@ -211,6 +214,7 @@ class TestRunner:
                         "error": f"{response.status_code} {response.reason}",
                         "final_status": "HTTP Error"
                     })
+                logger.error(f"Process {process_id}: HTTP Error - {response.status_code} {response.reason} ({elapsed:.2f}s)")
                 return {
                     "status": f"{response.status_code} {response.reason}",
                     "response_time": elapsed,
@@ -220,12 +224,11 @@ class TestRunner:
                     "response_size_bytes": response_size
                 }
             
-            # If 200 OK, check the JSON response for status in content
             try:
                 response_json = response.json()
                 content_status = response_json.get("content", {}).get("status", "Unknown")
+                logger.debug(f"Process {process_id}: Initial status - {content_status} ({elapsed:.2f}s)")
                 
-                # If status is not Completed, poll until it is or max attempts reached
                 if content_status != "Completed":
                     attempts = 1
                     while attempts < MAX_STATUS_CHECKS and content_status != "Completed":
@@ -240,9 +243,7 @@ class TestRunner:
                             timeout=30
                         )
                         check_elapsed = time.time() - check_start
-                        elapsed += check_elapsed  # Accumulate all check times
-                        
-                        # Accumulate request/response sizes
+                        elapsed += check_elapsed
                         request_size += len(str(headers)) + len(URL_API.format(processUid=process_id))
                         response_size += len(response.text)
                         
@@ -257,6 +258,7 @@ class TestRunner:
                                     "error": f"Status check failed: {response.status_code} {response.reason}",
                                     "final_status": "HTTP Error during polling"
                                 })
+                            logger.error(f"Process {process_id}: Status check failed - {response.status_code} {response.reason} ({elapsed:.2f}s)")
                             return {
                                 "status": f"Status check failed: {response.status_code} {response.reason}",
                                 "response_time": elapsed,
@@ -269,6 +271,7 @@ class TestRunner:
                         response_json = response.json()
                         content_status = response_json.get("content", {}).get("status", "Unknown")
                         attempts += 1
+                        logger.debug(f"Process {process_id}: Check {attempts}/{MAX_STATUS_CHECKS} - Status: {content_status} ({check_elapsed:.2f}s)")
                 
                 if content_status == "Completed":
                     with self.lock:
@@ -280,6 +283,7 @@ class TestRunner:
                             "success": True,
                             "final_status": "Completed"
                         })
+                    logger.info(f"Process {process_id}: Completed successfully ({elapsed:.2f}s)")
                     return {
                         "status": f"200 OK - Completed",
                         "response_time": elapsed,
@@ -291,7 +295,7 @@ class TestRunner:
                 else:
                     with self.lock:
                         self.api_stats.append({
-                            "process_id": process_id,
+                            "process_id": processევ
                             "response_time": elapsed,
                             "request_size_bytes": request_size,
                             "response_size_bytes": response_size,
@@ -299,6 +303,7 @@ class TestRunner:
                             "error": f"Final status: {content_status} (after {attempts} checks)",
                             "final_status": f"Timeout - {content_status}"
                         })
+                    logger.warning(f"Process {process_id}: Timed out - Final status: {content_status} after {attempts} checks ({elapsed:.2f}s)")
                     return {
                         "status": f"200 OK - Final status: {content_status} (after {attempts} checks)",
                         "response_time": elapsed,
@@ -308,7 +313,7 @@ class TestRunner:
                         "response_size_bytes": response_size
                     }
                     
-            except ValueError:  # JSON decode error
+            except ValueError:
                 with self.lock:
                     self.api_stats.append({
                         "process_id": process_id,
@@ -319,6 +324,7 @@ class TestRunner:
                         "error": "Invalid JSON response",
                         "final_status": "Invalid JSON"
                     })
+                logger.error(f"Process {process_id}: Invalid JSON response ({elapsed:.2f}s)")
                 return {
                     "status": "200 OK - Invalid JSON response",
                     "response_time": elapsed,
@@ -339,6 +345,7 @@ class TestRunner:
                     "error": str(e),
                     "final_status": f"Exception: {str(e)}"
                 })
+            logger.error(f"Process {process_id}: Exception - {str(e)}")
             return {
                 "status": f"Error: {str(e)}",
                 "response_time": 0,
@@ -350,6 +357,7 @@ class TestRunner:
 
     def worker(self):
         try:
+            logger.info(f"Starting worker {self.completed_processes + 1}/{MAX_THREADS}")
             token_result = self.token_manager.get_token()
             if not token_result or not token_result["token"]:
                 raise ValueError("Token generation failed")
@@ -375,7 +383,7 @@ class TestRunner:
                     "token_response_time": token_result["response_time"],
                     "token_success": token_result["success"]
                 })
-                print(f"[{self.completed_processes}] Process {process_id}: {api_result['status']} ({api_result['response_time']:.2f}s)")
+                logger.info(f"[{self.completed_processes}/{MAX_THREADS}] Process {process_id}: {api_result['status']} ({api_result['response_time']:.2f}s)")
                 
             return api_result
             
@@ -395,7 +403,7 @@ class TestRunner:
                     "token_response_time": 0,
                     "token_success": False
                 })
-            print(f"⚠️ Worker failed: {str(e)}")
+            logger.error(f"Worker {self.completed_processes}/{MAX_THREADS} failed: {str(e)}")
             return None
 
     def calculate_metrics(self, data, time_field, size_field=None):
@@ -430,38 +438,31 @@ class TestRunner:
 
     def generate_report(self, test_duration):
         try:
-            print(f"\n📊 Generating comprehensive report at: {OUTPUT_EXCEL}")
+            logger.info(f"Generating comprehensive report at: {OUTPUT_EXCEL}")
             
-            # Calculate metrics for each endpoint
             token_metrics = self.calculate_metrics(self.token_manager.token_stats, "response_time", "request_size_bytes")
             processing_metrics = self.calculate_metrics(self.processing_stats, "response_time", "request_size_bytes")
             api_metrics = self.calculate_metrics(self.api_stats, "response_time", "request_size_bytes")
             
-            # Calculate throughput and KB/sec for each endpoint
             for metrics in [token_metrics, processing_metrics, api_metrics]:
-                metrics["throughput"] = metrics["count"] / test_duration if test_duration > 0 else 0
+                metrics["throughput"] = metrics['count'] / test_duration if test_duration > 0 else 0
                 metrics["received_kb_sec"] = metrics["total_response_kb"] / test_duration if test_duration > 0 else 0
                 metrics["sent_kb_sec"] = metrics["total_request_kb"] / test_duration if test_duration > 0 else 0
 
-            # Create a new Excel workbook with single sheet for all metrics
             wb = Workbook()
             ws = wb.active
             ws.title = "Performance Metrics"
             
-            # Header style
             header_font = Font(bold=True, color="FFFFFF")
             header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
             
-            # Endpoint headers
             endpoints = ["Token Endpoint", "ProcessID Endpoint", "API Endpoint"]
             ws.append([""] + endpoints)
             
-            # Apply header style
             for cell in ws[1]:
                 cell.font = header_font
                 cell.fill = header_fill
             
-            # Metrics to display (in order)
             metric_rows = [
                 ("Total Requests", "count"),
                 ("Successful Requests", "success_count"),
@@ -473,7 +474,7 @@ class TestRunner:
                 ("Median Latency (s)", "median", lambda x: f"{x:.4f}"),
                 ("90th Percentile (s)", "p90", lambda x: f"{x:.4f}"),
                 ("95th Percentile (s)", "p95", lambda x: f"{x:.4f}"),
-                ("99th Percentile (s)", "p99", lambda x: f"{x:.4f}"),
+                ("99th Percentile (s)", "p99", lambda x其次: f"{x:.4f}"),
                 ("Throughput (requests/sec)", "throughput", lambda x: f"{x:.2f}"),
                 ("Total Sent (KB)", "total_request_kb", lambda x: f"{x:.2f}"),
                 ("Total Received (KB)", "total_response_kb", lambda x: f"{x:.2f}"),
@@ -481,7 +482,6 @@ class TestRunner:
                 ("Receive Rate (KB/sec)", "received_kb_sec", lambda x: f"{x:.2f}")
             ]
             
-            # Add all metrics
             for label, metric_key, *formatter in metric_rows:
                 formatter = formatter[0] if formatter else lambda x: x
                 row = [label]
@@ -490,8 +490,7 @@ class TestRunner:
                     row.append(formatter(value))
                 ws.append(row)
             
-            # Add summary section
-            ws.append([])  # Empty row
+            ws.append([])
             ws.append(["Test Summary"])
             ws.append(["Test Duration (seconds)", f"{test_duration:.2f}"])
             ws.append(["Total Threads", MAX_THREADS])
@@ -503,7 +502,6 @@ class TestRunner:
             ws.append(["Overall Error Rate", f"{((len(self.results) - len([r for r in self.results if r['success']])) / len(self.results) * 100 if len(self.results) > 0 else 0):.2f}%"])
             ws.append(["Overall Throughput (requests/sec)", f"{len(self.results) / test_duration:.2f}" if test_duration > 0 else "0.00"])
             
-            # Formatting
             for col in ws.columns:
                 max_length = 0
                 column = col[0].column_letter
@@ -516,7 +514,6 @@ class TestRunner:
                 adjusted_width = (max_length + 2)
                 ws.column_dimensions[column].width = adjusted_width
             
-            # Add borders to metrics table
             from openpyxl.styles import Border, Side
             thin_border = Border(left=Side(style='thin'), 
                                 right=Side(style='thin'), 
@@ -527,40 +524,37 @@ class TestRunner:
                 for cell in row:
                     cell.border = thin_border
             
-            # Save the workbook
             wb.save(OUTPUT_EXCEL)
-            print("✅ Comprehensive report generated successfully")
+            logger.info("Comprehensive report generated successfully")
             
         except PermissionError:
-            print(f"❌ ERROR: Please close Excel file if open: {OUTPUT_EXCEL}")
+            logger.error(f"PermissionError: Please close Excel file if open: {OUTPUT_EXCEL}")
             raise
         except Exception as e:
-            print(f"❌ Failed to generate report: {str(e)}")
+            logger.error(f"Failed to generate report: {str(e)}")
             raise
 
     def run_dynamic_test(self):
-        print(f"🚀 Starting test with {MAX_THREADS} threads, each performing one flow...")
+        logger.info(f"Starting test with {MAX_THREADS} threads, each performing one flow...")
         start_time = time.time()
-        self.completed_processes = 0  # Reset counter
+        self.completed_processes = 0
         
         with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-            # Submit exactly 50 workers, each performing one flow
             futures = [executor.submit(self.worker) for _ in range(MAX_THREADS)]
             
-            # Wait for all threads to complete
             for future in as_completed(futures):
-                future.result()  # Ensure all futures are resolved
+                future.result()
         
         test_duration = time.time() - start_time
         self.generate_report(test_duration)
         
-        print("\n=== TEST COMPLETE ===")
-        print(f"Total duration: {test_duration:.2f}s")
-        print(f"Total processes completed: {len(self.results)}")
-        print(f"Tokens generated: {self.token_manager.total_tokens_generated}")
-        print(f"Process IDs generated: {len(self.processing_stats)}")
-        print(f"API calls made: {len(self.api_stats)}")
-        print(f"Report saved to: {OUTPUT_EXCEL}")
+        logger.info("=== TEST COMPLETE ===")
+        logger.info(f"Total duration: {test_duration:.2f}s")
+        logger.info(f"Total processes completed: {len(self.results)}")
+        logger.info(f"Tokens generated: {self.token_manager.total_tokens_generated}")
+        logger.info(f"Process IDs generated: {len(self.processing_stats)}")
+        logger.info(f"API calls made: {len(self.api_stats)}")
+        logger.info(f"Report saved to: {OUTPUT_EXCEL}")
         
         return self.results
 
