@@ -16,13 +16,18 @@ import os
 import math
 import logging
 
-# Configure logging
+# Configure logging with immediate flush
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
+logger.handlers[0].setStream(sys.stdout)  # Ensure stdout for real-time output
+logger.handlers[0].flush = lambda: sys.stdout.flush()  # Force flush
 
 # Configuration
 URL_AUTH = "https:///token"
@@ -36,10 +41,12 @@ PFX_PASSPHRASE = ""
 VERIFY_SSL = True
 
 # Test Configuration
-MAX_THREADS = 10    # Reduced to prevent server overload
+MAX_THREADS = 5     # Further reduced to minimize server load
 TOKEN_REFRESH_TIME = 20  # seconds
-MAX_STATUS_CHECKS = 150  # Increased to allow ~300s for API completion
+MAX_STATUS_CHECKS = 150  # Allow ~300s for API completion
 STATUS_CHECK_INTERVAL = 2  # Seconds between status checks
+API_TIMEOUT = 300   # Increased timeout for slow API (seconds)
+WORKER_TIMEOUT = 600  # Timeout for each worker thread (seconds)
 
 # Output Configuration
 OUTPUT_DIR = Path.cwd() / "performance_results"
@@ -103,7 +110,7 @@ class TokenManager:
                 pkcs12_filename=PFX_PATH,
                 pkcs12_password=PFX_PASSPHRASE,
                 verify=VERIFY_SSL,
-                timeout=30
+                timeout=API_TIMEOUT
             )
             elapsed = time.time() - start_time
             request_size = len(str(data)) + len(URL_AUTH) + len(USERNAME) + len(PASSWORD)
@@ -121,7 +128,20 @@ class TokenManager:
             self.token_stats.append(token_result)
             logger.debug(f"Token request successful: {elapsed:.2f}s")
             return token_result
-        except Exception as e:
+        except requests.exceptions.Timeout:
+            error_result = {
+                "token": None,
+                "response_time": 0,
+                "request_size_bytes": 0,
+                "response_size_bytes": 0,
+                "success": False,
+                "error": "Request timed out",
+                "from_cache": False
+            }
+            self.token_stats.append(error_result)
+            logger.error("Token generation timed out")
+            return error_result
+        except requests.exceptions.RequestException as e:
             error_result = {
                 "token": None,
                 "response_time": 0,
@@ -156,7 +176,7 @@ class TestRunner:
                 pkcs12_filename=PFX_PATH,
                 pkcs12_password=PFX_PASSPHRASE,
                 verify=VERIFY_SSL,
-                timeout=30
+                timeout=API_TIMEOUT
             )
             elapsed = time.time() - start_time
             request_size = len(str(headers)) + len(URL_PROCESSING)
@@ -173,7 +193,19 @@ class TestRunner:
                 })
             logger.info(f"Process ID {process_id} generated: {elapsed:.2f}s")
             return process_id
-        except Exception as e:
+        except requests.exceptions.Timeout:
+            with self.lock:
+                self.processing_stats.append({
+                    "process_id": None,
+                    "response_time": 0,
+                    "request_size_bytes": 0,
+                    "response_size_bytes": 0,
+                    "success": False,
+                    "error": "Request timed out"
+                })
+            logger.error("Process ID generation timed out")
+            return None
+        except requests.exceptions.RequestException as e:
             with self.lock:
                 self.processing_stats.append({
                     "process_id": None,
@@ -197,7 +229,7 @@ class TestRunner:
                 pkcs12_filename=PFX_PATH,
                 pkcs12_password=PFX_PASSPHRASE,
                 verify=VERIFY_SSL,
-                timeout=30
+                timeout=API_TIMEOUT
             )
             elapsed = time.time() - start_time
             request_size = len(str(headers)) + len(URL_API.format(processUid=process_id))
@@ -233,21 +265,49 @@ class TestRunner:
                     attempts = 1
                     while attempts < MAX_STATUS_CHECKS and content_status != "Completed":
                         time.sleep(STATUS_CHECK_INTERVAL)
+                        logger.debug(f"Process {process_id}: Heartbeat - Waiting for check {attempts + 1}/{MAX_STATUS_CHECKS}")
                         check_start = time.time()
-                        response = self.requests_pkcs12.get(
-                            URL_API.format(processUid=process_id),
-                            headers=headers,
-                            pkcs12_filename=PFX_PATH,
-                            pkcs12_password=PFX_PASSPHRASE,
-                            verify=VERIFY_SSL,
-                            timeout=30
-                        )
-                        check_elapsed = time.time() - check_start
-                        elapsed += check_elapsed
-                        request_size += len(str(headers)) + len(URL_API.format(processUid=process_id))
-                        response_size += len(response.text)
-                        
-                        if response.status_code != 200:
+                        try:
+                            response = self.requests_pkcs12.get(
+                                URL_API.format(processUid=process_id),
+                                headers=headers,
+                                pkcs12_filename=PFX_PATH,
+                                pkcs12_password=PFX_PASSPHRASE,
+                                verify=VERIFY_SSL,
+                                timeout=API_TIMEOUT
+                            )
+                            check_elapsed = time.time() - check_start
+                            elapsed += check_elapsed
+                            request_size += len(str(headers)) + len(URL_API.format(processUid=process_id))
+                            response_size += len(response.text)
+                            
+                            if response.status_code != 200:
+                                with self.lock:
+                                    self.api_stats.append({
+                                        "process_id": process_id,
+                                        "response_time": elapsed,
+                                        "request_size_bytes": request_size,
+                                        "response_size_bytes": response_size,
+                                        "success": False,
+                                        "error": f"Status check failed: {response.status_code} {response.reason}",
+                                        "final_status": "HTTP Error during polling"
+                                    })
+                                logger.error(f"Process {process_id}: Status check failed - {response.status_code} {response.reason} ({elapsed:.2f}s)")
+                                return {
+                                    "status": f"Status check failed: {response.status_code} {response.reason}",
+                                    "response_time": elapsed,
+                                    "success": False,
+                                    "final_status": "HTTP Error during polling",
+                                    "request_size_bytes": request_size,
+                                    "response_size_bytes": response_size
+                                }
+                            
+                            response_json = response.json()
+                            content_status = response_json.get("content", {}).get("status", "Unknown")
+                            attempts += 1
+                            logger.debug(f"Process {process_id}: Check {attempts}/{MAX_STATUS_CHECKS} - Status: {content_status} ({check_elapsed:.2f}s)")
+                        except requests.exceptions.Timeout:
+                            elapsed += STATUS_CHECK_INTERVAL
                             with self.lock:
                                 self.api_stats.append({
                                     "process_id": process_id,
@@ -255,23 +315,18 @@ class TestRunner:
                                     "request_size_bytes": request_size,
                                     "response_size_bytes": response_size,
                                     "success": False,
-                                    "error": f"Status check failed: {response.status_code} {response.reason}",
-                                    "final_status": "HTTP Error during polling"
+                                    "error": f"Status check {attempts} timed out",
+                                    "final_status": "Timeout during polling"
                                 })
-                            logger.error(f"Process {process_id}: Status check failed - {response.status_code} {response.reason} ({elapsed:.2f}s)")
+                            logger.error(f"Process {process_id}: Status check {attempts} timed out")
                             return {
-                                "status": f"Status check failed: {response.status_code} {response.reason}",
+                                "status": f"Status check {attempts} timed out",
                                 "response_time": elapsed,
                                 "success": False,
-                                "final_status": "HTTP Error during polling",
+                                "final_status": "Timeout during polling",
                                 "request_size_bytes": request_size,
                                 "response_size_bytes": response_size
                             }
-                        
-                        response_json = response.json()
-                        content_status = response_json.get("content", {}).get("status", "Unknown")
-                        attempts += 1
-                        logger.debug(f"Process {process_id}: Check {attempts}/{MAX_STATUS_CHECKS} - Status: {content_status} ({check_elapsed:.2f}s)")
                 
                 if content_status == "Completed":
                     with self.lock:
@@ -295,7 +350,7 @@ class TestRunner:
                 else:
                     with self.lock:
                         self.api_stats.append({
-                            "process_id": processევ
+                            "process_id": process_id,
                             "response_time": elapsed,
                             "request_size_bytes": request_size,
                             "response_size_bytes": response_size,
@@ -313,7 +368,7 @@ class TestRunner:
                         "response_size_bytes": response_size
                     }
                     
-            except ValueError:
+            except ValueError as e:
                 with self.lock:
                     self.api_stats.append({
                         "process_id": process_id,
@@ -321,10 +376,10 @@ class TestRunner:
                         "request_size_bytes": request_size,
                         "response_size_bytes": response_size,
                         "success": False,
-                        "error": "Invalid JSON response",
+                        "error": f"Invalid JSON response: {str(e)}",
                         "final_status": "Invalid JSON"
                     })
-                logger.error(f"Process {process_id}: Invalid JSON response ({elapsed:.2f}s)")
+                logger.error(f"Process {process_id}: Invalid JSON response - {str(e)} ({elapsed:.2f}s)")
                 return {
                     "status": "200 OK - Invalid JSON response",
                     "response_time": elapsed,
@@ -334,6 +389,46 @@ class TestRunner:
                     "response_size_bytes": response_size
                 }
                 
+        except requests.exceptions.Timeout:
+            with self.lock:
+                self.api_stats.append({
+                    "process_id": process_id,
+                    "response_time": 0,
+                    "request_size_bytes": 0,
+                    "response_size_bytes": 0,
+                    "success": False,
+                    "error": "Initial status check timed out",
+                    "final_status": "Timeout"
+                })
+            logger.error(f"Process {process_id}: Initial status check timed out")
+            return {
+                "status": "Initial status check timed out",
+                "response_time": 0,
+                "success": False,
+                "final_status": "Timeout",
+                "request_size_bytes": 0,
+                "response_size_bytes": 0
+            }
+        except requests.exceptions.RequestException as e:
+            with self.lock:
+                self.api_stats.append({
+                    "process_id": process_id,
+                    "response_time": 0,
+                    "request_size_bytes": 0,
+                    "response_size_bytes": 0,
+                    "success": False,
+                    "error": str(e),
+                    "final_status": f"Request Exception: {str(e)}"
+                })
+            logger.error(f"Process {process_id}: Request failed - {str(e)}")
+            return {
+                "status": f"Error: {str(e)}",
+                "response_time": 0,
+                "success": False,
+                "final_status": f"Request Exception: {str(e)}",
+                "request_size_bytes": 0,
+                "response_size_bytes": 0
+            }
         except Exception as e:
             with self.lock:
                 self.api_stats.append({
@@ -343,14 +438,14 @@ class TestRunner:
                     "response_size_bytes": 0,
                     "success": False,
                     "error": str(e),
-                    "final_status": f"Exception: {str(e)}"
+                    "final_status": f"Unexpected Exception: {str(e)}"
                 })
-            logger.error(f"Process {process_id}: Exception - {str(e)}")
+            logger.error(f"Process {process_id}: Unexpected error - {str(e)}")
             return {
                 "status": f"Error: {str(e)}",
                 "response_time": 0,
                 "success": False,
-                "final_status": f"Exception: {str(e)}",
+                "final_status": f"Unexpected Exception: {str(e)}",
                 "request_size_bytes": 0,
                 "response_size_bytes": 0
             }
@@ -445,7 +540,7 @@ class TestRunner:
             api_metrics = self.calculate_metrics(self.api_stats, "response_time", "request_size_bytes")
             
             for metrics in [token_metrics, processing_metrics, api_metrics]:
-                metrics["throughput"] = metrics['count'] / test_duration if test_duration > 0 else 0
+                metrics["throughput"] = metrics["count"] / test_duration if test_duration > 0 else 0
                 metrics["received_kb_sec"] = metrics["total_response_kb"] / test_duration if test_duration > 0 else 0
                 metrics["sent_kb_sec"] = metrics["total_request_kb"] / test_duration if test_duration > 0 else 0
 
@@ -474,7 +569,7 @@ class TestRunner:
                 ("Median Latency (s)", "median", lambda x: f"{x:.4f}"),
                 ("90th Percentile (s)", "p90", lambda x: f"{x:.4f}"),
                 ("95th Percentile (s)", "p95", lambda x: f"{x:.4f}"),
-                ("99th Percentile (s)", "p99", lambda x其次: f"{x:.4f}"),
+                ("99th Percentile (s)", "p99", lambda x: f"{x:.4f}"),
                 ("Throughput (requests/sec)", "throughput", lambda x: f"{x:.2f}"),
                 ("Total Sent (KB)", "total_request_kb", lambda x: f"{x:.2f}"),
                 ("Total Received (KB)", "total_response_kb", lambda x: f"{x:.2f}"),
@@ -542,8 +637,11 @@ class TestRunner:
         with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
             futures = [executor.submit(self.worker) for _ in range(MAX_THREADS)]
             
-            for future in as_completed(futures):
-                future.result()
+            try:
+                for future in as_completed(futures, timeout=WORKER_TIMEOUT * MAX_THREADS):
+                    future.result()
+            except concurrent.futures.TimeoutError:
+                logger.error("Test timed out: Some workers did not complete within the allocated time")
         
         test_duration = time.time() - start_time
         self.generate_report(test_duration)
